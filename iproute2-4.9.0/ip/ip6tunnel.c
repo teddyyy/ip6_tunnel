@@ -37,7 +37,7 @@
 #include "tunnel.h"
 #include "ip_common.h"
 
-#include "../../ip6_tunnel_uapi.h"
+#include "../../kmod/ip6_tunnel_uapi.h"
 
 #define IP6_FLOWINFO_TCLASS	htonl(0x0FF00000)
 #define IP6_FLOWINFO_FLOWLABEL	htonl(0x000FFFFF)

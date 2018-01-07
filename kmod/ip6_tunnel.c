@@ -784,6 +784,12 @@ int ip6_tnl_rcv_ctl(struct ip6_tnl *t,
 }
 EXPORT_SYMBOL_GPL(ip6_tnl_rcv_ctl);
 
+static int ip6_skinny_rcv(struct sk_buff *skb)
+{
+	pr_info("%s\n", __func__);
+	return 0;
+}
+
 static int __ip6_tnl_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb,
 			 const struct tnl_ptk_info *tpi,
 			 struct metadata_dst *tun_dst,
@@ -817,6 +823,11 @@ static int __ip6_tnl_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb,
 	}
 
 	skb->protocol = tpi->proto;
+
+	if (tunnel->parms.is_skinny) {
+		err = ip6_skinny_rcv(skb);
+		return 0;
+	}
 
 	/* Warning: All skb pointers will be invalidated! */
 	if (tunnel->dev->type == ARPHRD_ETHER) {
@@ -1378,6 +1389,8 @@ ip6_tnl_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		break;
 	case htons(ETH_P_IPV6):
 		ret = ip6ip6_tnl_xmit(skb, dev);
+		if (t->parms.is_skinny)
+			pr_info("%s\n", __func__);
 		break;
 	default:
 		goto tx_err;
