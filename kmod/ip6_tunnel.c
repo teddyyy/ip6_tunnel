@@ -71,6 +71,7 @@ MODULE_LICENSE("GPL");
 MODULE_ALIAS_RTNL_LINK("ip6tnl");
 MODULE_ALIAS_NETDEV("ip6tnl0");
 
+#define IP6_SKINNY_HEADER_LENGTH  32
 #define IP6_TUNNEL_HASH_SIZE_SHIFT  5
 #define IP6_TUNNEL_HASH_SIZE (1 << IP6_TUNNEL_HASH_SIZE_SHIFT)
 
@@ -1814,7 +1815,11 @@ ip6_tnl_dev_init_gen(struct net_device *dev)
 	if (ret)
 		goto destroy_dst;
 
-	t->tun_hlen = 0;
+	if (t->parms.is_skinny)
+		t->tun_hlen = IP6_SKINNY_HEADER_LENGTH;
+	else
+		t->tun_hlen = 0;
+
 	t->hlen = t->encap_hlen + t->tun_hlen;
 	t_hlen = t->hlen + sizeof(struct ipv6hdr);
 
