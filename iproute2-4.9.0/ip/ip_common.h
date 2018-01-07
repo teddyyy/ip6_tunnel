@@ -42,7 +42,6 @@ int do_ipneigh(int argc, char **argv);
 int do_ipntable(int argc, char **argv);
 int do_iptunnel(int argc, char **argv);
 int do_ip6tunnel(int argc, char **argv);
-int do_ipskinny(int argc, char **argv);
 int do_iptuntap(int argc, char **argv);
 int do_iplink(int argc, char **argv);
 int do_ipmacsec(int argc, char **argv);
