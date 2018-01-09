@@ -18,6 +18,11 @@ KERNEL_MODULE_PATH="../kmod"
 CUSTOM_IP_PATH="../iproute2-4.9.0/ip/ip"
 
 function setup_netns {
+	ip netns list | grep ${NETNS_NAME}
+	if [ $? -eq 0 ]; then
+		ip netns delete ${NETNS_NAME}
+	fi
+
 	ip link set ${NETNS_DEV_NAME} up
 	ip netns add ${NETNS_NAME}
 	ip link set ${NETNS_DEV_NAME} netns ${NETNS_NAME}
@@ -47,8 +52,8 @@ function setup_kernelmodule {
 
 function setup_ip6tunnel {
 	ip netns exec ${NETNS_NAME} ${CUSTOM_IP_PATH} -6 tunnel add ${NETNS_TUN_NAME} mode skinny remote ${UNDERLAY_REMOTE_IP6} local ${UNDERLAY_LOCAL_IP6} dev ${NETNS_DEV_NAME}
-	ip netns exec ${NETNS_NAME} ip -6 addr add dev ${NETNS_TUN_NAME} ${OVERLAY_LOCAL_IP6} peer ${OVERLAY_REMOTE_IP6}
 	ip netns exec ${NETNS_NAME} ip link set dev ${NETNS_TUN_NAME} up
+	ip netns exec ${NETNS_NAME} ip -6 addr add ${OVERLAY_LOCAL_IP6} dev ${NETNS_TUN_NAME}
 	ip netns exec ${NETNS_NAME} ip -6 route add ${OVERLAY_NETWORK6} dev ${NETNS_TUN_NAME}
 }
 
