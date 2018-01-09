@@ -824,10 +824,8 @@ static int __ip6_tnl_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb,
 
 	skb->protocol = tpi->proto;
 
-	if (tunnel->parms.is_skinny) {
-		err = ip6_skinny_rcv(skb);
-		return 0;
-	}
+	if (tunnel->parms.is_skinny)
+		ip6_skinny_rcv(skb);
 
 	/* Warning: All skb pointers will be invalidated! */
 	if (tunnel->dev->type == ARPHRD_ETHER) {

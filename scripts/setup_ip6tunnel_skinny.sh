@@ -23,7 +23,6 @@ function setup_netns {
 		ip netns delete ${NETNS_NAME}
 	fi
 
-	ip link set ${NETNS_DEV_NAME} up
 	ip netns add ${NETNS_NAME}
 	ip link set ${NETNS_DEV_NAME} netns ${NETNS_NAME}
 	ip netns exec ${NETNS_NAME} ip link set ${NETNS_DEV_NAME} up
