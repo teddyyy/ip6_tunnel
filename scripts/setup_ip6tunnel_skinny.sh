@@ -65,7 +65,10 @@ function setup_kernelmodule {
 }
 
 function setup_ip6tunnel {
-	ip netns exec ${NETNS_NAME} ${CUSTOM_IP_PATH} -6 tunnel add ${NETNS_TUN_NAME} mode skinny remote ${UNDERLAY_REMOTE_IP6} local ${UNDERLAY_LOCAL_IP6} dev ${NETNS_DEV_NAME}
+	ip netns exec ${NETNS_NAME} ${CUSTOM_IP_PATH} \
+			-6 tunnel add ${NETNS_TUN_NAME} \
+			mode skinny remote ${UNDERLAY_REMOTE_IP6} \
+			local ${UNDERLAY_LOCAL_IP6} dev ${NETNS_DEV_NAME}
 	ip netns exec ${NETNS_NAME} ip link set dev ${NETNS_TUN_NAME} up
 	ip netns exec ${NETNS_NAME} ip -6 addr add ${OVERLAY_LOCAL_IP6} dev ${NETNS_TUN_NAME}
 	ip netns exec ${NETNS_NAME} ip -6 route add ${OVERLAY_NET6} dev ${NETNS_TUN_NAME}
