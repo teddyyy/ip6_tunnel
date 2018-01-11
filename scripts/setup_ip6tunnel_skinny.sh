@@ -14,7 +14,26 @@ OVERLAY_LOCAL_IP6="2001:3:0:1::1/64"
 
 # path
 KERNEL_MODULE_PATH="../kmod"
+IPROUTE_PKG_PATH="../iproute2-4.9.0/"
 CUSTOM_IP_PATH="../iproute2-4.9.0/ip/ip"
+
+function compile {
+	# build kernel module
+	cd ${KERNEL_MODULE_PATH}
+
+        make clean
+        make
+
+	# return to script directory
+	cd -
+
+	# build iproute package
+	cd ${IPROUTE_PKG_PATH}
+	./configure
+	make
+
+	cd -
+}
 
 function setup_netns {
 	ip netns list | grep ${NETNS_NAME}
@@ -31,9 +50,6 @@ function setup_netns {
 
 function setup_kernelmodule {
 	cd ${KERNEL_MODULE_PATH}
-
-	make clean
-	make
 
 	lsmod | grep ip6_tunnel
 	if [ $? -eq 0 ]; then
@@ -59,6 +75,8 @@ if [ ${EUID:-${UID}} -ne 0 ]; then
 	echo "Require root privilege"
 	exit -1
 fi
+
+compile
 
 echo "Setup IP6 over IP6 tunnel..."
 setup_netns
