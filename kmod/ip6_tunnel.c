@@ -786,7 +786,11 @@ EXPORT_SYMBOL_GPL(ip6_tnl_rcv_ctl);
 
 static int ip6_skinny_rcv(struct sk_buff *skb)
 {
-	pr_info("%s\n", __func__);
+	struct ipv6hdr *ipv6h = ipv6_hdr(skb);
+
+	pr_info("src addr:  %pI6, %s\n", &ipv6h->saddr, __func__);
+	pr_info("dst addr:  %pI6, %s\n", &ipv6h->daddr, __func__);
+
 	return 0;
 }
 
@@ -1227,6 +1231,18 @@ tx_err_dst_release:
 }
 EXPORT_SYMBOL(ip6_tnl_xmit);
 
+int ip6_skny_xmit(struct sk_buff *skb, struct net_device *dev, __u8 dsfield,
+                  struct flowi6 *fl6, int encap_limit, __u32 *pmtu,
+                  __u8 proto)
+{
+	struct ipv6hdr *ipv6h = ipv6_hdr(skb);
+
+	pr_info("src addr:  %pI6, %s\n", &ipv6h->saddr, __func__);
+	pr_info("dst addr:  %pI6, %s\n", &ipv6h->daddr, __func__);
+
+	return ip6_tnl_xmit(skb, dev, dsfield, fl6, encap_limit, pmtu, IPPROTO_IPV6);
+}
+
 static inline int
 ip4ip6_tnl_xmit(struct sk_buff *skb, struct net_device *dev)
 {
@@ -1363,8 +1379,12 @@ ip6ip6_tnl_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	skb_set_inner_ipproto(skb, IPPROTO_IPV6);
 
-	err = ip6_tnl_xmit(skb, dev, dsfield, &fl6, encap_limit, &mtu,
-			   IPPROTO_IPV6);
+	if (t->parms.is_skinny)
+		err = ip6_skny_xmit(skb, dev, dsfield, &fl6, encap_limit, &mtu,
+	                            NEXTHDR_DEST);
+	else
+		err = ip6_tnl_xmit(skb, dev, dsfield, &fl6, encap_limit, &mtu,
+				   IPPROTO_IPV6);
 	if (err != 0) {
 		if (err == -EMSGSIZE)
 			icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
@@ -1387,8 +1407,6 @@ ip6_tnl_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		break;
 	case htons(ETH_P_IPV6):
 		ret = ip6ip6_tnl_xmit(skb, dev);
-		if (t->parms.is_skinny)
-			pr_info("%s\n", __func__);
 		break;
 	default:
 		goto tx_err;
@@ -1457,6 +1475,8 @@ static void ip6_tnl_link_config(struct ip6_tnl *t)
 			dev->mtu = rt->dst.dev->mtu - t_hlen;
 			if (!(t->parms.flags & IP6_TNL_F_IGN_ENCAP_LIMIT))
 				dev->mtu -= 8;
+			if (t->parms.is_skinny)
+				dev->mtu += 8;
 
 			if (dev->mtu < IPV6_MIN_MTU)
 				dev->mtu = IPV6_MIN_MTU;
@@ -1826,11 +1846,7 @@ ip6_tnl_dev_init_gen(struct net_device *dev)
 	if (ret)
 		goto destroy_dst;
 
-	if (t->parms.is_skinny)
-		t->tun_hlen = IP6_SKINNY_HEADER_LENGTH;
-	else
-		t->tun_hlen = 0;
-
+	t->tun_hlen = 0;
 	t->hlen = t->encap_hlen + t->tun_hlen;
 	t_hlen = t->hlen + sizeof(struct ipv6hdr);
 
@@ -1839,6 +1855,8 @@ ip6_tnl_dev_init_gen(struct net_device *dev)
 	dev->mtu = ETH_DATA_LEN - t_hlen;
 	if (!(t->parms.flags & IP6_TNL_F_IGN_ENCAP_LIMIT))
 		dev->mtu -= 8;
+	if (t->parms.is_skinny)
+		dev->mtu += 8;
 	dev->min_mtu = ETH_MIN_MTU;
 	dev->max_mtu = 0xFFF8 - dev->hard_header_len;
 
