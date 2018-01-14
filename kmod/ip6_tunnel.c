@@ -1278,6 +1278,7 @@ int ip6_skny_xmit(struct sk_buff *skb, struct net_device *dev, __u8 dsfield,
 	struct net *net = t->net;
 	struct net_device_stats *stats = &t->dev->stats;
 	struct ipv6hdr *ipv6h = ipv6_hdr(skb);
+	struct ip6_skny_exthdr *seh;
 	struct ipv6_tel_txoption opt;
 	struct dst_entry *dst = NULL, *ndst = NULL;
 	struct net_device *tdev;
@@ -1358,7 +1359,103 @@ route_lookup:
 				     t->parms.name);
 		goto tx_err_dst_release;
 	}
-	//return ip6_tnl_xmit(skb, dev, dsfield, fl6, encap_limit, pmtu, IPPROTO_IPV6);
+	mtu = dst_mtu(dst) - psh_hlen - t->tun_hlen;
+	if (encap_limit >= 0) {
+		max_headroom += 8;
+		mtu -= 8;
+	}
+	if (mtu < IPV6_MIN_MTU)
+		mtu = IPV6_MIN_MTU;
+	if (skb_dst(skb) && !t->parms.collect_md)
+		skb_dst(skb)->ops->update_pmtu(skb_dst(skb), NULL, skb, mtu);
+	if (skb->len - t->tun_hlen > mtu && !skb_is_gso(skb)) {
+		*pmtu = mtu;
+		err = -EMSGSIZE;
+		goto tx_err_dst_release;
+	}
+
+	if (t->err_count > 0) {
+		if (time_before(jiffies,
+				t->err_time + IP6TUNNEL_ERR_TIMEO)) {
+			t->err_count--;
+
+			dst_link_failure(skb);
+		} else {
+			t->err_count = 0;
+		}
+	}
+
+	skb_scrub_packet(skb, !net_eq(t->net, dev_net(dev)));
+
+	/*
+	 * Okay, now see if we can stuff it in the buffer as-is.
+	 */
+	max_headroom += LL_RESERVED_SPACE(tdev);
+
+	if (skb_headroom(skb) < max_headroom || skb_shared(skb) ||
+	    (skb_cloned(skb) && !skb_clone_writable(skb, 0))) {
+		struct sk_buff *new_skb;
+
+		new_skb = skb_realloc_headroom(skb, max_headroom);
+		if (!new_skb)
+			goto tx_err_dst_release;
+
+		if (skb->sk)
+			skb_set_owner_w(new_skb, skb->sk);
+		consume_skb(skb);
+		skb = new_skb;
+	}
+
+	if (t->parms.collect_md) {
+		if (t->encap.type != TUNNEL_ENCAP_NONE)
+			goto tx_err_dst_release;
+	} else {
+		if (use_cache && ndst)
+			dst_cache_set_ip6(&t->dst_cache, ndst, &fl6->saddr);
+	}
+	skb_dst_set(skb, dst);
+
+	if (encap_limit >= 0) {
+		init_tel_txopt(&opt, encap_limit);
+		ipv6_push_nfrag_opts(skb, &opt.ops, &proto, NULL, NULL);
+	}
+
+	/* Calculate max headroom for all the headers and adjust
+	 * needed_headroom if necessary.
+	 */
+	max_headroom = LL_RESERVED_SPACE(dst->dev) + sizeof(struct ipv6hdr)
+			+ dst->header_len + t->hlen;
+	if (max_headroom > dev->needed_headroom)
+		dev->needed_headroom = max_headroom;
+
+	err = ip6_tnl_encap(skb, t, &proto, fl6);
+	if (err)
+		return err;
+
+	skb_push(skb, sizeof(struct ip6_skny_exthdr));
+	memmove(skb->data, ipv6h, sizeof(struct ipv6hdr));
+
+	skb_reset_network_header(skb);
+	ipv6h = ipv6_hdr(skb);
+	ip6_flow_hdr(ipv6h, INET_ECN_encapsulate(0, dsfield),
+		     ip6_make_flowlabel(net, skb, fl6->flowlabel, true, fl6));
+
+	memset(skb->data + sizeof(struct ipv6hdr), 0, sizeof(struct ip6_skny_exthdr));
+
+	seh = (struct ip6_skny_exthdr *)(skb->data + sizeof(struct ipv6hdr));
+	seh->nexthdr = ipv6h->nexthdr;
+	seh->hdrlen = 0x03;
+	seh->opttype = 0x1e;
+	seh->optdatalen = 0x1c;
+	seh->padding = 0x00;
+	seh->inner_payload_len = 0xffff;
+	seh->inner_hoplimit = 0xff;
+
+	ipv6h->hop_limit = hop_limit;
+	ipv6h->nexthdr = proto;
+	ipv6h->saddr = fl6->saddr;
+	ipv6h->daddr = fl6->daddr;
+	ip6tunnel_xmit(NULL, skb, dev);
 tx_err_link_failure:
 	stats->tx_carrier_errors++;
 	dst_link_failure(skb);
