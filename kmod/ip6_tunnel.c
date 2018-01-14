@@ -79,6 +79,45 @@ static bool log_ecn_error = true;
 module_param(log_ecn_error, bool, 0644);
 MODULE_PARM_DESC(log_ecn_error, "Log packets received with corrupted ECN");
 
+/*
+ *   Skinny IPv6-in-IPv6 Extension Header
+ *   https://www.ietf.org/id/draft-smith-skinny-ipv6-in-ipv6-tunnelling-00.txt
+ *
+ *   0                   1                   2                   3
+ *   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+ *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *  |  Next Header  |  Hdr Ext Len  |            Reserved           |
+ *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *  |               |      Inner Payload Length     |Inner Hop Limit|
+ *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *  |                                                               |
+ *  +                     Inner SA 64 bit Prefix                    +
+ *  |                                                               |
+ *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *  |                                                               |
+ *  +                     Inner DA 64 bit Prefix                    +
+ *  |                                                               |
+ *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *  |                                                               |
+ *  +                      Inner DA 64 bit IID                      +
+ *  |                                                               |
+ *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *
+ */
+
+struct ip6_skny_exthdr {
+	__u8	nexthdr;
+	__u8	hdrlen;
+	__u8    opttype; // This field corresponds to the reserved field of the skinny header
+	__u8    optdatalen; // This field corresponds to the reserved field of the skinny header
+	__u8    padding; // This field corresponds to the reserved field of the skinny header
+	__u16	inner_payload_len;
+	__u8	inner_hoplimit;
+	__u64	inner_src_prefix;
+	__u64	inner_dst_prefix;
+	__u64	inner_dst_iid;
+};
+
 static u32 HASH(const struct in6_addr *addr1, const struct in6_addr *addr2)
 {
 	u32 hash = ipv6_addr_hash(addr1) ^ ipv6_addr_hash(addr2);
@@ -1235,12 +1274,97 @@ int ip6_skny_xmit(struct sk_buff *skb, struct net_device *dev, __u8 dsfield,
                   struct flowi6 *fl6, int encap_limit, __u32 *pmtu,
                   __u8 proto)
 {
+	struct ip6_tnl *t = netdev_priv(dev);
+	struct net *net = t->net;
+	struct net_device_stats *stats = &t->dev->stats;
 	struct ipv6hdr *ipv6h = ipv6_hdr(skb);
+	struct ipv6_tel_txoption opt;
+	struct dst_entry *dst = NULL, *ndst = NULL;
+	struct net_device *tdev;
+	int mtu;
+	unsigned int psh_hlen = sizeof(struct ipv6hdr) + t->encap_hlen;
+	unsigned int max_headroom = psh_hlen;
+	bool use_cache = false;
+	u8 hop_limit;
+	int err = -1;
 
-	pr_info("src addr:  %pI6, %s\n", &ipv6h->saddr, __func__);
-	pr_info("dst addr:  %pI6, %s\n", &ipv6h->daddr, __func__);
+	if (t->parms.collect_md) {
+		hop_limit = skb_tunnel_info(skb)->key.ttl;
+		goto route_lookup;
+	} else {
+		hop_limit = t->parms.hop_limit;
+	}
 
-	return ip6_tnl_xmit(skb, dev, dsfield, fl6, encap_limit, pmtu, IPPROTO_IPV6);
+	/* NBMA tunnel */
+	if (ipv6_addr_any(&t->parms.raddr)) {
+		struct in6_addr *addr6;
+		struct neighbour *neigh;
+		int addr_type;
+
+		if (!skb_dst(skb))
+			goto tx_err_link_failure;
+
+		neigh = dst_neigh_lookup(skb_dst(skb),
+					 &ipv6_hdr(skb)->daddr);
+		if (!neigh)
+			goto tx_err_link_failure;
+
+		addr6 = (struct in6_addr *)&neigh->primary_key;
+		addr_type = ipv6_addr_type(addr6);
+
+		if (addr_type == IPV6_ADDR_ANY)
+			addr6 = &ipv6_hdr(skb)->daddr;
+
+		memcpy(&fl6->daddr, addr6, sizeof(fl6->daddr));
+		neigh_release(neigh);
+	} else if (!(t->parms.flags &
+		     (IP6_TNL_F_USE_ORIG_TCLASS | IP6_TNL_F_USE_ORIG_FWMARK))) {
+		/* enable the cache only only if the routing decision does
+		 * not depend on the current inner header value
+		 */
+		use_cache = true;
+	}
+
+	if (use_cache)
+		dst = dst_cache_get(&t->dst_cache);
+
+	if (!ip6_tnl_xmit_ctl(t, &fl6->saddr, &fl6->daddr))
+		goto tx_err_link_failure;
+
+	if (!dst) {
+route_lookup:
+		dst = ip6_route_output(net, NULL, fl6);
+
+		if (dst->error)
+			goto tx_err_link_failure;
+		dst = xfrm_lookup(net, dst, flowi6_to_flowi(fl6), NULL, 0);
+		if (IS_ERR(dst)) {
+			err = PTR_ERR(dst);
+			dst = NULL;
+			goto tx_err_link_failure;
+		}
+		if (t->parms.collect_md &&
+		    ipv6_dev_get_saddr(net, ip6_dst_idev(dst)->dev,
+				       &fl6->daddr, 0, &fl6->saddr))
+			goto tx_err_link_failure;
+		ndst = dst;
+	}
+
+	tdev = dst->dev;
+
+	if (tdev == dev) {
+		stats->collisions++;
+		net_warn_ratelimited("%s: Local routing loop detected!\n",
+				     t->parms.name);
+		goto tx_err_dst_release;
+	}
+	//return ip6_tnl_xmit(skb, dev, dsfield, fl6, encap_limit, pmtu, IPPROTO_IPV6);
+tx_err_link_failure:
+	stats->tx_carrier_errors++;
+	dst_link_failure(skb);
+tx_err_dst_release:
+	dst_release(dst);
+	return err;
 }
 
 static inline int
