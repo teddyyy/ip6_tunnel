@@ -112,17 +112,26 @@ struct ip6_skny_exthdr {
 	__u8    optdatalen; // This field corresponds to the reserved field of the skinny header
 	__u8    padding; // This field corresponds to the reserved field of the skinny header
 	__u16	inner_payload_len;
-	__u8	inner_hoplimit;
-	__u64	inner_src_prefix;
-	__u64	inner_dst_prefix;
-	__u64	inner_dst_iid;
-};
+	__u8	inner_hop_limit;
+	__u32	inner_src_prefix[2];
+	__u32	inner_dst_prefix[2];
+} __attribute__((packed));
+
+struct ip6_skny_option {
+	__u32	inner_dst_iid[2];
+} __attribute__((packed));
 
 static u32 HASH(const struct in6_addr *addr1, const struct in6_addr *addr2)
 {
 	u32 hash = ipv6_addr_hash(addr1) ^ ipv6_addr_hash(addr2);
 
 	return hash_32(hash, IP6_TUNNEL_HASH_SIZE_SHIFT);
+}
+
+static u32
+extract_addr6_parts(const struct in6_addr *a, int pos)
+{
+        return a->s6_addr32[pos];
 }
 
 static int ip6_tnl_dev_init(struct net_device *dev);
@@ -1282,6 +1291,7 @@ int ip6_skny_xmit(struct sk_buff *skb, struct net_device *dev, __u8 dsfield,
 	struct ipv6_tel_txoption opt;
 	struct dst_entry *dst = NULL, *ndst = NULL;
 	struct net_device *tdev;
+	struct in6_addr new_outer_src, new_outer_dst;
 	int mtu;
 	unsigned int psh_hlen = sizeof(struct ipv6hdr) + t->encap_hlen;
 	unsigned int max_headroom = psh_hlen;
@@ -1400,6 +1410,7 @@ route_lookup:
 		if (!new_skb)
 			goto tx_err_dst_release;
 
+
 		if (skb->sk)
 			skb_set_owner_w(new_skb, skb->sk);
 		consume_skb(skb);
@@ -1444,17 +1455,35 @@ route_lookup:
 
 	seh = (struct ip6_skny_exthdr *)(skb->data + sizeof(struct ipv6hdr));
 	seh->nexthdr = ipv6h->nexthdr;
-	seh->hdrlen = 0x03;
+	seh->hdrlen = 0x02;
 	seh->opttype = 0x1e;
-	seh->optdatalen = 0x1c;
+	seh->optdatalen = 0x14;
 	seh->padding = 0x00;
-	seh->inner_payload_len = 0xffff;
-	seh->inner_hoplimit = 0xff;
+	seh->inner_payload_len = ipv6h->payload_len;
+	seh->inner_hop_limit = ipv6h->hop_limit;
+	seh->inner_src_prefix[0] = extract_addr6_parts(&ipv6h->saddr, 0);
+	seh->inner_src_prefix[1] = extract_addr6_parts(&ipv6h->saddr, 1);
+	seh->inner_dst_prefix[0] = extract_addr6_parts(&ipv6h->daddr, 0);
+	seh->inner_dst_prefix[1] = extract_addr6_parts(&ipv6h->daddr, 1);
+
+	memset(&new_outer_src, 0, sizeof(new_outer_src));
+	memset(&new_outer_dst, 0, sizeof(new_outer_dst));
+
+	new_outer_src.s6_addr32[0] = extract_addr6_parts(&fl6->saddr, 0);
+	new_outer_src.s6_addr32[1] = extract_addr6_parts(&fl6->saddr, 1);
+	new_outer_src.s6_addr32[2] = extract_addr6_parts(&ipv6h->saddr, 2);
+	new_outer_src.s6_addr32[3] = extract_addr6_parts(&ipv6h->saddr, 3);
+
+	new_outer_dst.s6_addr32[0] = extract_addr6_parts(&fl6->daddr, 0);
+	new_outer_dst.s6_addr32[1] = extract_addr6_parts(&fl6->daddr, 1);
+	new_outer_dst.s6_addr32[2] = extract_addr6_parts(&ipv6h->daddr, 2);
+	new_outer_dst.s6_addr32[3] = extract_addr6_parts(&ipv6h->daddr, 3);
 
 	ipv6h->hop_limit = hop_limit;
 	ipv6h->nexthdr = proto;
-	ipv6h->saddr = fl6->saddr;
-	ipv6h->daddr = fl6->daddr;
+	ipv6h->saddr = new_outer_src;
+	ipv6h->daddr = new_outer_dst;
+	ipv6h->payload_len = htons(ntohs(ipv6h->payload_len) + sizeof(struct ip6_skny_exthdr));
 	ip6tunnel_xmit(NULL, skb, dev);
 tx_err_link_failure:
 	stats->tx_carrier_errors++;
@@ -1697,7 +1726,7 @@ static void ip6_tnl_link_config(struct ip6_tnl *t)
 			if (!(t->parms.flags & IP6_TNL_F_IGN_ENCAP_LIMIT))
 				dev->mtu -= 8;
 			if (t->parms.is_skinny)
-				dev->mtu += 8;
+				dev->mtu += 16;
 
 			if (dev->mtu < IPV6_MIN_MTU)
 				dev->mtu = IPV6_MIN_MTU;
@@ -2077,7 +2106,7 @@ ip6_tnl_dev_init_gen(struct net_device *dev)
 	if (!(t->parms.flags & IP6_TNL_F_IGN_ENCAP_LIMIT))
 		dev->mtu -= 8;
 	if (t->parms.is_skinny)
-		dev->mtu += 8;
+		dev->mtu += 16;
 	dev->min_mtu = ETH_MIN_MTU;
 	dev->max_mtu = 0xFFF8 - dev->hard_header_len;
 
