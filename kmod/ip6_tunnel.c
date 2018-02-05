@@ -71,7 +71,6 @@ MODULE_LICENSE("GPL");
 MODULE_ALIAS_RTNL_LINK("ip6tnl");
 MODULE_ALIAS_NETDEV("ip6tnl0");
 
-#define IP6_SKINNY_HEADER_LENGTH  32
 #define IP6_TUNNEL_HASH_SIZE_SHIFT  5
 #define IP6_TUNNEL_HASH_SIZE (1 << IP6_TUNNEL_HASH_SIZE_SHIFT)
 
@@ -121,17 +120,36 @@ struct ip6_skny_option {
 	__u32	inner_dst_iid[2];
 } __attribute__((packed));
 
+static u32
+extract_addr6_parts(const struct in6_addr *a, int pos)
+{
+        return a->s6_addr32[pos];
+}
+
+static inline u32 ipv6_halfaddr_hash(const struct in6_addr *a)
+{
+        return (__force u32)(a->s6_addr32[0] ^ a->s6_addr32[1]);
+}
+
+static inline bool ipv6_halfaddr_equal(const struct in6_addr *a1,
+                                       const struct in6_addr *a2)
+{
+        return ((a1->s6_addr32[0] ^ a2->s6_addr32[0]) |
+                (a1->s6_addr32[1] ^ a2->s6_addr32[1])) == 0;
+}
+
+static u32 HHASH(const struct in6_addr *addr1, const struct in6_addr *addr2)
+{
+	u32 hash = ipv6_halfaddr_hash(addr1) ^ ipv6_halfaddr_hash(addr2);
+
+	return hash_32(hash, IP6_TUNNEL_HASH_SIZE_SHIFT);
+}
+
 static u32 HASH(const struct in6_addr *addr1, const struct in6_addr *addr2)
 {
 	u32 hash = ipv6_addr_hash(addr1) ^ ipv6_addr_hash(addr2);
 
 	return hash_32(hash, IP6_TUNNEL_HASH_SIZE_SHIFT);
-}
-
-static u32
-extract_addr6_parts(const struct in6_addr *a, int pos)
-{
-        return a->s6_addr32[pos];
 }
 
 static int ip6_tnl_dev_init(struct net_device *dev);
@@ -194,35 +212,69 @@ static struct net_device_stats *ip6_get_stats(struct net_device *dev)
 	for (t = rcu_dereference(start); t; t = rcu_dereference(t->next))
 
 static struct ip6_tnl *
-ip6_tnl_lookup(struct net *net, const struct in6_addr *remote, const struct in6_addr *local)
+ip6_tnl_lookup(struct net *net, const struct in6_addr *remote, const struct in6_addr *local,
+	       bool half)
 {
-	unsigned int hash = HASH(remote, local);
 	struct ip6_tnl *t;
 	struct ip6_tnl_net *ip6n = net_generic(net, ip6_tnl_net_id);
 	struct in6_addr any;
+	unsigned int hash;
 
-	for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
-		if (ipv6_addr_equal(local, &t->parms.laddr) &&
-		    ipv6_addr_equal(remote, &t->parms.raddr) &&
-		    (t->dev->flags & IFF_UP))
-			return t;
+
+	if (half) {
+		hash = HHASH(remote, local);
+		for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
+			if (ipv6_halfaddr_equal(local, &t->parms.laddr) &&
+			    ipv6_halfaddr_equal(remote, &t->parms.raddr) &&
+			    (t->dev->flags & IFF_UP))
+				return t;
+		}
+	} else {
+		hash = HASH(remote, local);
+		for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
+			if (ipv6_addr_equal(local, &t->parms.laddr) &&
+			    ipv6_addr_equal(remote, &t->parms.raddr) &&
+			    (t->dev->flags & IFF_UP))
+				return t;
+		}
 	}
 
 	memset(&any, 0, sizeof(any));
-	hash = HASH(&any, local);
-	for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
-		if (ipv6_addr_equal(local, &t->parms.laddr) &&
-		    ipv6_addr_any(&t->parms.raddr) &&
-		    (t->dev->flags & IFF_UP))
-			return t;
+	if (half) {
+		hash = HHASH(&any, local);
+		for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
+			if (ipv6_halfaddr_equal(local, &t->parms.laddr) &&
+			    ipv6_addr_any(&t->parms.raddr) &&
+			    (t->dev->flags & IFF_UP))
+				return t;
+		}
+	} else {
+		hash = HASH(&any, local);
+		for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
+			if (ipv6_addr_equal(local, &t->parms.laddr) &&
+			    ipv6_addr_any(&t->parms.raddr) &&
+			    (t->dev->flags & IFF_UP))
+				return t;
+		}
 	}
 
-	hash = HASH(remote, &any);
-	for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
-		if (ipv6_addr_equal(remote, &t->parms.raddr) &&
-		    ipv6_addr_any(&t->parms.laddr) &&
-		    (t->dev->flags & IFF_UP))
-			return t;
+
+	if (half) {
+		hash = HHASH(remote, &any);
+		for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
+			if (ipv6_halfaddr_equal(remote, &t->parms.raddr) &&
+			    ipv6_addr_any(&t->parms.laddr) &&
+			    (t->dev->flags & IFF_UP))
+				return t;
+		}
+	} else {
+		hash = HASH(remote, &any);
+		for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
+			if (ipv6_addr_equal(remote, &t->parms.raddr) &&
+			    ipv6_addr_any(&t->parms.laddr) &&
+			    (t->dev->flags & IFF_UP))
+				return t;
+		}
 	}
 
 	t = rcu_dereference(ip6n->collect_md_tun);
@@ -542,7 +594,7 @@ ip6_tnl_err(struct sk_buff *skb, __u8 ipproto, struct inet6_skb_parm *opt,
 	   processing of the error. */
 
 	rcu_read_lock();
-	t = ip6_tnl_lookup(dev_net(skb->dev), &ipv6h->daddr, &ipv6h->saddr);
+	t = ip6_tnl_lookup(dev_net(skb->dev), &ipv6h->daddr, &ipv6h->saddr, 0);
 	if (!t)
 		goto out;
 
@@ -832,16 +884,6 @@ int ip6_tnl_rcv_ctl(struct ip6_tnl *t,
 }
 EXPORT_SYMBOL_GPL(ip6_tnl_rcv_ctl);
 
-static int ip6_skinny_rcv(struct sk_buff *skb)
-{
-	struct ipv6hdr *ipv6h = ipv6_hdr(skb);
-
-	pr_info("src addr:  %pI6, %s\n", &ipv6h->saddr, __func__);
-	pr_info("dst addr:  %pI6, %s\n", &ipv6h->daddr, __func__);
-
-	return 0;
-}
-
 static int __ip6_tnl_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb,
 			 const struct tnl_ptk_info *tpi,
 			 struct metadata_dst *tun_dst,
@@ -875,9 +917,6 @@ static int __ip6_tnl_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb,
 	}
 
 	skb->protocol = tpi->proto;
-
-	if (tunnel->parms.is_skinny)
-		ip6_skinny_rcv(skb);
 
 	/* Warning: All skb pointers will be invalidated! */
 	if (tunnel->dev->type == ARPHRD_ETHER) {
@@ -941,6 +980,66 @@ int ip6_tnl_rcv(struct ip6_tnl *t, struct sk_buff *skb,
 }
 EXPORT_SYMBOL(ip6_tnl_rcv);
 
+static int __ip6skinny_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb)
+{
+	struct ipv6hdr *ipv6h = ipv6_hdr(skb);
+        struct in6_addr new_inner_src, new_inner_dst;
+        struct ip6_skny_exthdr *exthdr;
+        char *payload;
+        __u8 nexthdr, inner_hop_limit;
+        __u16 inner_payload_len;
+        __u32 inner_src_prefix[2];
+        __u32 inner_dst_prefix[2];
+
+	exthdr = (struct ip6_skny_exthdr*)(skb->data + sizeof(struct ipv6hdr));
+	payload = (skb->data + sizeof(struct ipv6hdr) + sizeof(struct ip6_skny_exthdr));
+
+	// stores skinny header
+        nexthdr = exthdr->nexthdr;
+        inner_hop_limit = exthdr->inner_hop_limit;
+        inner_payload_len = exthdr->inner_payload_len;
+        inner_src_prefix[0] = exthdr->inner_src_prefix[0];
+        inner_src_prefix[1] = exthdr->inner_src_prefix[1];
+        inner_dst_prefix[0] = exthdr->inner_dst_prefix[0];
+        inner_dst_prefix[1] = exthdr->inner_dst_prefix[1];
+
+	// remove  skinny header
+        skb_pull(skb, sizeof(struct ip6_skny_exthdr));
+        memmove(skb->data, ipv6h, sizeof(struct ipv6hdr));
+        skb_reset_network_header(skb);
+        memmove(skb->data + sizeof(struct ipv6hdr), payload, inner_payload_len);
+        skb_reset_transport_header(skb);
+
+
+	ipv6h = ipv6_hdr(skb);
+
+        new_inner_src.s6_addr32[0] = inner_src_prefix[0];
+        new_inner_src.s6_addr32[1] = inner_src_prefix[1];
+        new_inner_src.s6_addr32[2] = extract_addr6_parts(&ipv6h->saddr, 2);
+        new_inner_src.s6_addr32[3] = extract_addr6_parts(&ipv6h->saddr, 3);
+
+        new_inner_dst.s6_addr32[0] = inner_dst_prefix[0];
+        new_inner_dst.s6_addr32[1] = inner_dst_prefix[1];
+        new_inner_dst.s6_addr32[2] = extract_addr6_parts(&ipv6h->daddr, 2);
+        new_inner_dst.s6_addr32[3] = extract_addr6_parts(&ipv6h->daddr, 3);
+
+	ipv6h->hop_limit = inner_hop_limit;
+        ipv6h->nexthdr = nexthdr;
+        ipv6h->saddr = new_inner_src;
+        ipv6h->daddr = new_inner_dst;
+        ipv6h->payload_len = inner_payload_len;
+
+	skb->protocol = htons(ETH_P_IPV6);
+	skb->dev = tunnel->dev;
+        skb_reset_network_header(skb);
+        memset(skb->cb, 0, sizeof(struct inet6_skb_parm));
+	__skb_tunnel_rx(skb, tunnel->dev, tunnel->net);
+
+	netif_rx(skb);
+
+	return 0;
+}
+
 static const struct tnl_ptk_info tpi_v6 = {
 	/* no tunnel info required for ipxip6. */
 	.proto = htons(ETH_P_IPV6),
@@ -963,17 +1062,19 @@ static int ipxip6_rcv(struct sk_buff *skb, u8 ipproto,
 	int ret = -1;
 
 	rcu_read_lock();
-	t = ip6_tnl_lookup(dev_net(skb->dev), &ipv6h->saddr, &ipv6h->daddr);
+	t = ip6_tnl_lookup(dev_net(skb->dev), &ipv6h->saddr, &ipv6h->daddr, 0);
 
 	if (t) {
 		u8 tproto = ACCESS_ONCE(t->parms.proto);
+
 
 		if (tproto != ipproto && tproto != 0)
 			goto drop;
 		if (!xfrm6_policy_check(NULL, XFRM_POLICY_IN, skb))
 			goto drop;
-		if (!ip6_tnl_rcv_ctl(t, &ipv6h->daddr, &ipv6h->saddr))
-			goto drop;
+		if (!t->parms.is_skinny)
+			if (!ip6_tnl_rcv_ctl(t, &ipv6h->daddr, &ipv6h->saddr))
+				goto drop;
 		if (iptunnel_pull_header(skb, 0, tpi->proto, false))
 			goto drop;
 		if (t->parms.collect_md) {
@@ -981,8 +1082,35 @@ static int ipxip6_rcv(struct sk_buff *skb, u8 ipproto,
 			if (!tun_dst)
 				return 0;
 		}
+
 		ret = __ip6_tnl_rcv(t, skb, tpi, tun_dst, dscp_ecn_decapsulate,
 				    log_ecn_error);
+	}
+
+	rcu_read_unlock();
+
+	return ret;
+
+drop:
+	rcu_read_unlock();
+	kfree_skb(skb);
+	return 0;
+}
+
+static int ip6skinny_rcv(struct sk_buff *skb)
+{
+	struct ip6_tnl *t;
+	const struct ipv6hdr *ipv6h = ipv6_hdr(skb);
+	int ret = -1;
+
+	rcu_read_lock();
+	t = ip6_tnl_lookup(dev_net(skb->dev), &ipv6h->saddr, &ipv6h->daddr, 1);
+
+	if (t) {
+		if (!t->parms.is_skinny)
+			goto drop;
+
+		ret = __ip6skinny_rcv(t, skb);
 	}
 
 	rcu_read_unlock();
@@ -1005,6 +1133,22 @@ static int ip6ip6_rcv(struct sk_buff *skb)
 {
 	return ipxip6_rcv(skb, IPPROTO_IPV6, &tpi_v6,
 			  ip6ip6_dscp_ecn_decapsulate);
+}
+
+static unsigned int netfilter_rcv(void *priv,
+				  struct sk_buff *skb,
+				  const struct nf_hook_state *state)
+{
+	struct ipv6hdr *ipv6h = ipv6_hdr(skb);
+
+	if (ipv6h->nexthdr == NEXTHDR_DEST &&
+	    pskb_may_pull(skb, sizeof(struct ip6_skny_exthdr))) {
+		ip6skinny_rcv(skb);
+
+		return NF_STOLEN;
+	}
+
+	return NF_ACCEPT;
 }
 
 struct ipv6_tel_txoption {
@@ -1060,13 +1204,14 @@ int ip6_tnl_xmit_ctl(struct ip6_tnl *t,
 		struct net_device *ldev = NULL;
 
 		rcu_read_lock();
-		if (p->link)
+		if (p->link) {
 			ldev = dev_get_by_index_rcu(net, p->link);
 
 		if (unlikely(!ipv6_chk_addr(net, laddr, ldev, 0)))
 			pr_warn("%s xmit: Local address not yet configured!\n",
-				p->name);
-		else if (!ipv6_addr_is_multicast(raddr) &&
+			p->name);
+
+		} else if (!ipv6_addr_is_multicast(raddr) &&
 			 unlikely(ipv6_chk_addr(net, raddr, NULL, 0)))
 			pr_warn("%s xmit: Routing loop! Remote address found on this node!\n",
 				p->name);
@@ -1339,9 +1484,6 @@ int ip6_skny_xmit(struct sk_buff *skb, struct net_device *dev, __u8 dsfield,
 	if (use_cache)
 		dst = dst_cache_get(&t->dst_cache);
 
-	if (!ip6_tnl_xmit_ctl(t, &fl6->saddr, &fl6->daddr))
-		goto tx_err_link_failure;
-
 	if (!dst) {
 route_lookup:
 		dst = ip6_route_output(net, NULL, fl6);
@@ -1483,6 +1625,10 @@ route_lookup:
 	ipv6h->nexthdr = proto;
 	ipv6h->saddr = new_outer_src;
 	ipv6h->daddr = new_outer_dst;
+
+	pr_info("src addr:  %pI6, %s\n", &ipv6h->saddr, __func__);
+        pr_info("dst addr:  %pI6, %s\n", &ipv6h->daddr, __func__);
+
 	ipv6h->payload_len = htons(ntohs(ipv6h->payload_len) + sizeof(struct ip6_skny_exthdr));
 	ip6tunnel_xmit(NULL, skb, dev);
 tx_err_link_failure:
@@ -2442,6 +2588,13 @@ static struct xfrm6_tunnel ip6ip6_handler __read_mostly = {
 	.priority	=	1,
 };
 
+static struct nf_hook_ops ip6_skny_hook_ops = {
+        .hook     = netfilter_rcv,
+        .pf       = PF_INET6,
+        .hooknum  = NF_INET_LOCAL_IN,
+        .priority = NF_IP6_PRI_FILTER,
+};
+
 static void __net_exit ip6_tnl_destroy_tunnels(struct net *net)
 {
 	struct ip6_tnl_net *ip6n = net_generic(net, ip6_tnl_net_id);
@@ -2550,6 +2703,12 @@ static int __init ip6_tunnel_init(void)
 		goto out_ip6ip6;
 	}
 
+	err = nf_register_hook(&ip6_skny_hook_ops);
+	if (err < 0) {
+		pr_err("%s: can't register ip6skinny\n", __func__);
+		goto out_ip6skinny;
+	}
+
 	err = rtnl_link_register(&ip6_link_ops);
 	if (err < 0)
 		goto rtnl_link_failed;
@@ -2557,6 +2716,8 @@ static int __init ip6_tunnel_init(void)
 	return 0;
 
 rtnl_link_failed:
+	nf_unregister_hook(&ip6_skny_hook_ops);
+out_ip6skinny:
 	xfrm6_tunnel_deregister(&ip6ip6_handler, AF_INET);
 out_ip6ip6:
 	xfrm6_tunnel_deregister(&ip4ip6_handler, AF_INET);
@@ -2579,6 +2740,7 @@ static void __exit ip6_tunnel_cleanup(void)
 	if (xfrm6_tunnel_deregister(&ip6ip6_handler, AF_INET6))
 		pr_info("%s: can't deregister ip6ip6\n", __func__);
 
+	nf_unregister_hook(&ip6_skny_hook_ops);
 	unregister_pernet_device(&ip6_tnl_net_ops);
 }
 
