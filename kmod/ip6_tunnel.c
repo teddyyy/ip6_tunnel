@@ -457,6 +457,7 @@ static struct ip6_tnl *ip6_tnl_locate(struct net *net,
 {
 	const struct in6_addr *remote = &p->raddr;
 	const struct in6_addr *local = &p->laddr;
+	bool half = p->is_skinny;
 	struct ip6_tnl __rcu **tp;
 	struct ip6_tnl *t;
 	struct ip6_tnl_net *ip6n = net_generic(net, ip6_tnl_net_id);
@@ -464,12 +465,20 @@ static struct ip6_tnl *ip6_tnl_locate(struct net *net,
 	for (tp = ip6_tnl_bucket(ip6n, p);
 	     (t = rtnl_dereference(*tp)) != NULL;
 	     tp = &t->next) {
-		if (ipv6_addr_equal(local, &t->parms.laddr) &&
-		    ipv6_addr_equal(remote, &t->parms.raddr)) {
-			if (create)
-				return ERR_PTR(-EEXIST);
-
-			return t;
+		if (half) {
+			if (ipv6_halfaddr_equal(local, &t->parms.laddr) &&
+			    ipv6_halfaddr_equal(remote, &t->parms.raddr)) {
+				if (create)
+					return ERR_PTR(-EEXIST);
+				return t;
+			}
+		} else {
+			if (ipv6_addr_equal(local, &t->parms.laddr) &&
+			    ipv6_addr_equal(remote, &t->parms.raddr)) {
+				if (create)
+					return ERR_PTR(-EEXIST);
+				return t;
+			}
 		}
 	}
 	if (!create)
