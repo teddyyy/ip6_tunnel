@@ -304,12 +304,16 @@ ip6_tnl_bucket(struct ip6_tnl_net *ip6n, const struct __ip6_tnl_parm *p)
 {
 	const struct in6_addr *remote = &p->raddr;
 	const struct in6_addr *local = &p->laddr;
+	bool half = p->is_skinny;
 	unsigned int h = 0;
 	int prio = 0;
 
 	if (!ipv6_addr_any(remote) || !ipv6_addr_any(local)) {
 		prio = 1;
-		h = HASH(remote, local);
+		if (half)
+			h = HHASH(remote, local);
+		else
+			h = HASH(remote, local);
 	}
 	return &ip6n->tnls[prio][h];
 }
