@@ -1673,6 +1673,7 @@ route_lookup:
 
 	ipv6h->payload_len = htons(ntohs(ipv6h->payload_len) + sizeof(struct ip6_skny_exthdr));
 	ip6tunnel_xmit(NULL, skb, dev);
+	return 0;
 tx_err_link_failure:
 	stats->tx_carrier_errors++;
 	dst_link_failure(skb);
