@@ -514,9 +514,8 @@ ip6_tnl_l4_update_checksum(struct sk_buff *skb, u8 nexthdr,
                            __u16 skinnny_header_len)
 {
 	struct ipv6hdr *ip6h = ipv6_hdr(skb);
-	u16 l4len = 0;
 	u32 sum1 = 0;
-        u16 sum2 = 0;
+        u16 l4len = 0, sum2 = 0, oldsum = 0;
 	struct tcphdr *tcph = NULL;
 	struct udphdr *udph = NULL;
 	struct icmp6hdr *icmp6h = NULL;
@@ -524,21 +523,32 @@ ip6_tnl_l4_update_checksum(struct sk_buff *skb, u8 nexthdr,
 	switch (nexthdr) {
 	case NEXTHDR_TCP:
 		tcph = (struct tcphdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
+		skb->csum = 0;
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+
+		oldsum = tcph->check;
 		l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
 		tcph->check = 0;
 		sum1 = csum_partial((char*)tcph, l4len, 0);
 		sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
 		tcph->check = sum2;
+		pr_info("tcp: %x -> %x\n", htons(oldsum), htons(tcph->check));
 		break;
 	case NEXTHDR_UDP:
 		udph = (struct udphdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
+		skb->csum = 0;
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+
+		oldsum = udph->check;
 		l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
 		udph->check = 0;
 		sum1 = csum_partial((char*)udph, l4len, 0);
 		sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
 		udph->check = sum2;
+		pr_info("udp: %x -> %x\n", htons(oldsum), htons(udph->check));
 		break;
 	case NEXTHDR_ICMP:
+		pr_info("icmp\n");
 		icmp6h = (struct icmp6hdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
                 l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
 		icmp6h->icmp6_cksum = 0;
