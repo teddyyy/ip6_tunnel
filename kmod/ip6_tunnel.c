@@ -509,6 +509,48 @@ ip6_tnl_dev_uninit(struct net_device *dev)
 	dev_put(dev);
 }
 
+static void
+ip6_tnl_l4_update_checksum(struct sk_buff *skb, u8 nexthdr,
+                           __u16 skinnny_header_len)
+{
+	struct ipv6hdr *ip6h = ipv6_hdr(skb);
+	u16 l4len = 0;
+	u32 sum1 = 0;
+        u16 sum2 = 0;
+	struct tcphdr *tcph = NULL;
+	struct udphdr *udph = NULL;
+	struct icmp6hdr *icmp6h = NULL;
+
+	switch (nexthdr) {
+	case NEXTHDR_TCP:
+		tcph = (struct tcphdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
+		l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
+		tcph->check = 0;
+		sum1 = csum_partial((char*)tcph, l4len, 0);
+		sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
+		tcph->check = sum2;
+		break;
+	case NEXTHDR_UDP:
+		udph = (struct udphdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
+		l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
+		udph->check = 0;
+		sum1 = csum_partial((char*)udph, l4len, 0);
+		sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
+		udph->check = sum2;
+		break;
+	case NEXTHDR_ICMP:
+		icmp6h = (struct icmp6hdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
+                l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
+		icmp6h->icmp6_cksum = 0;
+                sum1 = csum_partial((char*)icmp6h, l4len, 0);
+                sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
+                icmp6h->icmp6_cksum = sum2;
+		break;
+	default:
+		break;
+	}
+}
+
 /**
  * parse_tvl_tnl_enc_lim - handle encapsulation limit option
  *   @skb: received socket buffer
@@ -1066,6 +1108,7 @@ static int __ip6skinny_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb,
 
 	skb->protocol = htons(ETH_P_IPV6);
 	skb->dev = tunnel->dev;
+	ip6_tnl_l4_update_checksum(skb, ipv6h->nexthdr, 0);
         skb_reset_network_header(skb);
         memset(skb->cb, 0, sizeof(struct inet6_skb_parm));
 	__skb_tunnel_rx(skb, tunnel->dev, tunnel->net);
@@ -1672,6 +1715,7 @@ route_lookup:
 	ipv6h->daddr = new_outer_dst;
 
 	ipv6h->payload_len = htons(ntohs(ipv6h->payload_len) + sizeof(struct ip6_skny_exthdr));
+	ip6_tnl_l4_update_checksum(skb, seh->nexthdr, sizeof(struct ip6_skny_exthdr));
 	ip6tunnel_xmit(NULL, skb, dev);
 	return 0;
 tx_err_link_failure:
