@@ -1,0 +1,15 @@
+# interface
+NET_IF=""
+TUN_IF=""
+LOOPBACK_IF=""
+
+# network
+UNDERLAY_LOCAL_NET6=""
+UNDERLAY_REMOTE_NET6=""
+OVERLAY_LOCAL_IP6=""
+OVERLAY_REMOTE_NET6=""
+
+# path
+KERNEL_MODULE_PATH="../kmod"
+IPROUTE_PKG_PATH="../iproute2-4.9.0/"
+CUSTOM_IP_PATH="../iproute2-4.9.0/ip/ip"

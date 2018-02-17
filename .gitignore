@@ -42,3 +42,4 @@ modules.order
 # Other
 *.swp
 *.c~
+var.txt

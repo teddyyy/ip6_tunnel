@@ -304,12 +304,16 @@ ip6_tnl_bucket(struct ip6_tnl_net *ip6n, const struct __ip6_tnl_parm *p)
 {
 	const struct in6_addr *remote = &p->raddr;
 	const struct in6_addr *local = &p->laddr;
+	bool half = p->is_skinny;
 	unsigned int h = 0;
 	int prio = 0;
 
 	if (!ipv6_addr_any(remote) || !ipv6_addr_any(local)) {
 		prio = 1;
-		h = HASH(remote, local);
+		if (half)
+			h = HHASH(remote, local);
+		else
+			h = HASH(remote, local);
 	}
 	return &ip6n->tnls[prio][h];
 }
@@ -453,6 +457,7 @@ static struct ip6_tnl *ip6_tnl_locate(struct net *net,
 {
 	const struct in6_addr *remote = &p->raddr;
 	const struct in6_addr *local = &p->laddr;
+	bool half = p->is_skinny;
 	struct ip6_tnl __rcu **tp;
 	struct ip6_tnl *t;
 	struct ip6_tnl_net *ip6n = net_generic(net, ip6_tnl_net_id);
@@ -460,12 +465,20 @@ static struct ip6_tnl *ip6_tnl_locate(struct net *net,
 	for (tp = ip6_tnl_bucket(ip6n, p);
 	     (t = rtnl_dereference(*tp)) != NULL;
 	     tp = &t->next) {
-		if (ipv6_addr_equal(local, &t->parms.laddr) &&
-		    ipv6_addr_equal(remote, &t->parms.raddr)) {
-			if (create)
-				return ERR_PTR(-EEXIST);
-
-			return t;
+		if (half) {
+			if (ipv6_halfaddr_equal(local, &t->parms.laddr) &&
+			    ipv6_halfaddr_equal(remote, &t->parms.raddr)) {
+				if (create)
+					return ERR_PTR(-EEXIST);
+				return t;
+			}
+		} else {
+			if (ipv6_addr_equal(local, &t->parms.laddr) &&
+			    ipv6_addr_equal(remote, &t->parms.raddr)) {
+				if (create)
+					return ERR_PTR(-EEXIST);
+				return t;
+			}
 		}
 	}
 	if (!create)
@@ -494,6 +507,58 @@ ip6_tnl_dev_uninit(struct net_device *dev)
 		ip6_tnl_unlink(ip6n, t);
 	dst_cache_reset(&t->dst_cache);
 	dev_put(dev);
+}
+
+static void
+ip6_tnl_l4_update_checksum(struct sk_buff *skb, u8 nexthdr,
+                           __u16 skinnny_header_len)
+{
+	struct ipv6hdr *ip6h = ipv6_hdr(skb);
+	u32 sum1 = 0;
+        u16 l4len = 0, sum2 = 0, oldsum = 0;
+	struct tcphdr *tcph = NULL;
+	struct udphdr *udph = NULL;
+	struct icmp6hdr *icmp6h = NULL;
+
+	switch (nexthdr) {
+	case NEXTHDR_TCP:
+		tcph = (struct tcphdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
+		skb->csum = 0;
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+
+		oldsum = tcph->check;
+		l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
+		tcph->check = 0;
+		sum1 = csum_partial((char*)tcph, l4len, 0);
+		sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
+		tcph->check = sum2;
+		pr_info("tcp: %x -> %x\n", htons(oldsum), htons(tcph->check));
+		break;
+	case NEXTHDR_UDP:
+		udph = (struct udphdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
+		skb->csum = 0;
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+
+		oldsum = udph->check;
+		l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
+		udph->check = 0;
+		sum1 = csum_partial((char*)udph, l4len, 0);
+		sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
+		udph->check = sum2;
+		pr_info("udp: %x -> %x\n", htons(oldsum), htons(udph->check));
+		break;
+	case NEXTHDR_ICMP:
+		pr_info("icmp\n");
+		icmp6h = (struct icmp6hdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
+                l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
+		icmp6h->icmp6_cksum = 0;
+                sum1 = csum_partial((char*)icmp6h, l4len, 0);
+                sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
+                icmp6h->icmp6_cksum = sum2;
+		break;
+	default:
+		break;
+	}
 }
 
 /**
@@ -980,8 +1045,10 @@ int ip6_tnl_rcv(struct ip6_tnl *t, struct sk_buff *skb,
 }
 EXPORT_SYMBOL(ip6_tnl_rcv);
 
-static int __ip6skinny_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb)
+static int __ip6skinny_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb,
+			   const struct tnl_ptk_info *tpi)
 {
+	struct pcpu_sw_netstats *tstats;
 	struct ipv6hdr *ipv6h = ipv6_hdr(skb);
         struct in6_addr new_inner_src, new_inner_dst;
         struct ip6_skny_exthdr *exthdr;
@@ -990,6 +1057,26 @@ static int __ip6skinny_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb)
         __u16 inner_payload_len;
         __u32 inner_src_prefix[2];
         __u32 inner_dst_prefix[2];
+
+	if ((!(tpi->flags & TUNNEL_CSUM) &&
+             (tunnel->parms.i_flags & TUNNEL_CSUM)) ||
+            ((tpi->flags & TUNNEL_CSUM) &&
+             !(tunnel->parms.i_flags & TUNNEL_CSUM))) {
+                tunnel->dev->stats.rx_crc_errors++;
+                tunnel->dev->stats.rx_errors++;
+                goto drop;
+        }
+
+        if (tunnel->parms.i_flags & TUNNEL_SEQ) {
+                if (!(tpi->flags & TUNNEL_SEQ) ||
+                    (tunnel->i_seqno &&
+                     (s32)(ntohl(tpi->seq) - tunnel->i_seqno) < 0)) {
+                        tunnel->dev->stats.rx_fifo_errors++;
+                        tunnel->dev->stats.rx_errors++;
+                        goto drop;
+                }
+                tunnel->i_seqno = ntohl(tpi->seq) + 1;
+        }
 
 	exthdr = (struct ip6_skny_exthdr*)(skb->data + sizeof(struct ipv6hdr));
 	payload = (skb->data + sizeof(struct ipv6hdr) + sizeof(struct ip6_skny_exthdr));
@@ -1031,13 +1118,24 @@ static int __ip6skinny_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb)
 
 	skb->protocol = htons(ETH_P_IPV6);
 	skb->dev = tunnel->dev;
+	ip6_tnl_l4_update_checksum(skb, ipv6h->nexthdr, 0);
         skb_reset_network_header(skb);
         memset(skb->cb, 0, sizeof(struct inet6_skb_parm));
 	__skb_tunnel_rx(skb, tunnel->dev, tunnel->net);
 
+	tstats = this_cpu_ptr(tunnel->dev->tstats);
+        u64_stats_update_begin(&tstats->syncp);
+        tstats->rx_packets++;
+        tstats->rx_bytes += skb->len;
+        u64_stats_update_end(&tstats->syncp);
+
 	netif_rx(skb);
 
 	return 0;
+
+drop:
+        kfree_skb(skb);
+        return 0;
 }
 
 static const struct tnl_ptk_info tpi_v6 = {
@@ -1097,7 +1195,7 @@ drop:
 	return 0;
 }
 
-static int ip6skinny_rcv(struct sk_buff *skb)
+static int ip6skinny_rcv(struct sk_buff *skb, const struct tnl_ptk_info *tpi)
 {
 	struct ip6_tnl *t;
 	const struct ipv6hdr *ipv6h = ipv6_hdr(skb);
@@ -1110,7 +1208,7 @@ static int ip6skinny_rcv(struct sk_buff *skb)
 		if (!t->parms.is_skinny)
 			goto drop;
 
-		ret = __ip6skinny_rcv(t, skb);
+		ret = __ip6skinny_rcv(t, skb, tpi);
 	}
 
 	rcu_read_unlock();
@@ -1135,15 +1233,15 @@ static int ip6ip6_rcv(struct sk_buff *skb)
 			  ip6ip6_dscp_ecn_decapsulate);
 }
 
-static unsigned int netfilter_rcv(void *priv,
-				  struct sk_buff *skb,
-				  const struct nf_hook_state *state)
+static unsigned int ip6dst_rcv(void *priv,
+			       struct sk_buff *skb,
+			       const struct nf_hook_state *state)
 {
 	struct ipv6hdr *ipv6h = ipv6_hdr(skb);
 
 	if (ipv6h->nexthdr == NEXTHDR_DEST &&
 	    pskb_may_pull(skb, sizeof(struct ip6_skny_exthdr))) {
-		ip6skinny_rcv(skb);
+		ip6skinny_rcv(skb, &tpi_v6);
 
 		return NF_STOLEN;
 	}
@@ -1626,11 +1724,10 @@ route_lookup:
 	ipv6h->saddr = new_outer_src;
 	ipv6h->daddr = new_outer_dst;
 
-	pr_info("src addr:  %pI6, %s\n", &ipv6h->saddr, __func__);
-        pr_info("dst addr:  %pI6, %s\n", &ipv6h->daddr, __func__);
-
 	ipv6h->payload_len = htons(ntohs(ipv6h->payload_len) + sizeof(struct ip6_skny_exthdr));
+	ip6_tnl_l4_update_checksum(skb, seh->nexthdr, sizeof(struct ip6_skny_exthdr));
 	ip6tunnel_xmit(NULL, skb, dev);
+	return 0;
 tx_err_link_failure:
 	stats->tx_carrier_errors++;
 	dst_link_failure(skb);
@@ -2588,11 +2685,11 @@ static struct xfrm6_tunnel ip6ip6_handler __read_mostly = {
 	.priority	=	1,
 };
 
-static struct nf_hook_ops ip6_skny_hook_ops = {
-        .hook     = netfilter_rcv,
-        .pf       = PF_INET6,
-        .hooknum  = NF_INET_LOCAL_IN,
-        .priority = NF_IP6_PRI_FILTER,
+static struct nf_hook_ops ip6_skny_hook_ops __read_mostly = {
+        .hook		= ip6dst_rcv,
+        .pf		= PF_INET6,
+        .hooknum	= NF_INET_LOCAL_IN,
+        .priority	= NF_IP6_PRI_FILTER,
 };
 
 static void __net_exit ip6_tnl_destroy_tunnels(struct net *net)
