@@ -511,7 +511,7 @@ ip6_tnl_dev_uninit(struct net_device *dev)
 
 static void
 ip6_tnl_l4_update_checksum(struct sk_buff *skb, u8 nexthdr,
-                           __u16 skinnny_header_len)
+                           __u16 offset)
 {
 	struct ipv6hdr *ip6h = ipv6_hdr(skb);
 	u32 sum1 = 0;
@@ -522,35 +522,32 @@ ip6_tnl_l4_update_checksum(struct sk_buff *skb, u8 nexthdr,
 
 	switch (nexthdr) {
 	case NEXTHDR_TCP:
-		tcph = (struct tcphdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
+		tcph = (struct tcphdr *)(skb->data + sizeof(struct ipv6hdr) + offset);
 		skb->csum = 0;
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
 
 		oldsum = tcph->check;
-		l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
+		l4len = ntohs(ip6h->payload_len) - offset;
 		tcph->check = 0;
 		sum1 = csum_partial((char*)tcph, l4len, 0);
 		sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
 		tcph->check = sum2;
-		pr_info("tcp: %x -> %x\n", htons(oldsum), htons(tcph->check));
 		break;
 	case NEXTHDR_UDP:
-		udph = (struct udphdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
+		udph = (struct udphdr *)(skb->data + sizeof(struct ipv6hdr) + offset);
 		skb->csum = 0;
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
 
 		oldsum = udph->check;
-		l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
+		l4len = ntohs(ip6h->payload_len) - offset;
 		udph->check = 0;
 		sum1 = csum_partial((char*)udph, l4len, 0);
 		sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
 		udph->check = sum2;
-		pr_info("udp: %x -> %x\n", htons(oldsum), htons(udph->check));
 		break;
 	case NEXTHDR_ICMP:
-		pr_info("icmp\n");
-		icmp6h = (struct icmp6hdr *)(skb->data + sizeof(struct ipv6hdr) + skinnny_header_len);
-                l4len = ntohs(ip6h->payload_len) - skinnny_header_len;
+		icmp6h = (struct icmp6hdr *)(skb->data + sizeof(struct ipv6hdr) + offset);
+                l4len = ntohs(ip6h->payload_len) - offset;
 		icmp6h->icmp6_cksum = 0;
                 sum1 = csum_partial((char*)icmp6h, l4len, 0);
                 sum2 = csum_ipv6_magic(&ip6h->saddr, &ip6h->daddr, l4len, nexthdr, sum1);
@@ -1118,7 +1115,14 @@ static int __ip6skinny_rcv(struct ip6_tnl *tunnel, struct sk_buff *skb,
 
 	skb->protocol = htons(ETH_P_IPV6);
 	skb->dev = tunnel->dev;
-	ip6_tnl_l4_update_checksum(skb, ipv6h->nexthdr, 0);
+
+	if (ipv6h->nexthdr == NEXTHDR_FRAGMENT) {
+		struct frag_hdr *fh = (struct frag_hdr*)(skb->data + sizeof(struct ipv6hdr));
+                ip6_tnl_l4_update_checksum(skb, fh->nexthdr, sizeof(struct frag_hdr));
+	} else {
+		ip6_tnl_l4_update_checksum(skb, ipv6h->nexthdr, 0);
+	}
+
         skb_reset_network_header(skb);
         memset(skb->cb, 0, sizeof(struct inet6_skb_parm));
 	__skb_tunnel_rx(skb, tunnel->dev, tunnel->net);
@@ -1725,7 +1729,18 @@ route_lookup:
 	ipv6h->daddr = new_outer_dst;
 
 	ipv6h->payload_len = htons(ntohs(ipv6h->payload_len) + sizeof(struct ip6_skny_exthdr));
-	ip6_tnl_l4_update_checksum(skb, seh->nexthdr, sizeof(struct ip6_skny_exthdr));
+
+	if (seh->nexthdr == NEXTHDR_FRAGMENT) {
+		struct frag_hdr *fh = (struct frag_hdr*)(skb->data
+							 + sizeof(struct ipv6hdr)
+							 + sizeof(struct ip6_skny_exthdr));
+		ip6_tnl_l4_update_checksum(skb, fh->nexthdr,
+					   sizeof(struct ip6_skny_exthdr) +
+					   sizeof(struct frag_hdr));
+	} else {
+		ip6_tnl_l4_update_checksum(skb, seh->nexthdr, sizeof(struct ip6_skny_exthdr));
+	}
+
 	ip6tunnel_xmit(NULL, skb, dev);
 	return 0;
 tx_err_link_failure:
